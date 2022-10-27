@@ -225,21 +225,77 @@ def make_element_wise_dict(list_of_keys, list_of_values):
                     )
                 )
 
+# Function below adapted from https://github.com/napari/magicgui/issues/190#issuecomment-804109530
+from magicgui import magic_factory
+
+def connect_events(widget):
+    def toggle_multichannel_widgets(event):
+        widget.reference_label_image.visible = event
+        widget.intersection_area_over_object_area.visible = event
+        widget.return_summary_statistics.visible = event
+    
+    def toggle_summary_statisics_widgets(event):
+        # counts always activates with summary statistics to have at least one
+        # statistic selected
+        widget.counts.value = event
+        if (event == True) & (widget.return_summary_statistics.value == False):
+            return
+        widget.counts.visible = event
+        widget.mean.visible = event
+        widget.std.visible = event
+        widget.minimum.visible = event
+        widget.percentile_25.visible = event
+        widget.median.visible = event
+        widget.percentile_75.visible = event
+        widget.maximum.visible = event
+	
+    widget.multichannel.changed.connect(toggle_multichannel_widgets)
+    widget.multichannel.changed.connect(toggle_summary_statisics_widgets)
+    
+    # Initial states
+    widget.multichannel.value = False
+    widget.reference_label_image.visible = False
+    widget.intersection_area_over_object_area.visible = False
+    widget.return_summary_statistics.visible = False
+    
+    widget.return_summary_statistics.changed.connect(toggle_summary_statisics_widgets)
+    widget.counts.visible = False
+    widget.mean.visible = False
+    widget.std.visible = False
+    widget.minimum.visible = False
+    widget.percentile_25.visible = False
+    widget.median.visible = False
+    widget.percentile_75.visible = False
+    widget.maximum.visible = False
+    # avoid layout reflow on toggle...
+	# currently only possible with backend API
+    # widget.native.layout().addStretch()
+
 
 @register_function(
     menu="Measurement > Regionprops map multichannel (scikit-image, nsr)")
+@magic_factory(widget_init=connect_events)
 def napari_regionprops_map_channels_table(
         label_images: List[napari.types.LabelsData],
         intensity_images: List[napari.types.ImageData],
+        multichannel: bool,
         reference_label_image: napari.types.LabelsData,
-        intersection_area_over_object_area: float = 0.5,
-        return_summary_statistics: bool = True,
         size: bool = True,
         intensity: bool = True,
         perimeter: bool = False,
         shape: bool = False,
         position: bool = False,
         moments: bool = False,
+        intersection_area_over_object_area: float = 0.5,
+        return_summary_statistics: bool = True,
+        counts: bool = True,
+        mean: bool = False,
+        std: bool = False,
+        minimum: bool = False,
+        percentile_25: bool = False,
+        median: bool = False,
+        percentile_75: bool = False,
+        maximum: bool = False,
         napari_viewer: Viewer = None) -> "pandas.DataFrame":
     """
     Add a table widget to a napari viewer with mapped summary statistics.
@@ -251,7 +307,24 @@ def napari_regionprops_map_channels_table(
     not related to intensities. If a single label image is given, it executes
     regular 'regionprops_table' function.
     """
-
+    statistics_list = []
+    if counts:
+        statistics_list += ['count']
+    if mean:
+        statistics_list += ['mean']
+    if std:
+        statistics_list += ['std']
+    if minimum:
+        statistics_list += ['min']
+    if percentile_25:
+        statistics_list += ['25%']
+    if median:
+        statistics_list += ['50%']
+    if percentile_75:
+        statistics_list += ['75%']
+    if maximum:
+        statistics_list += ['max']
+    
     if napari_viewer is not None:
         # store list of labels layers for saving results later
         labels_layer_list = [None]*len(label_images)
@@ -279,6 +352,7 @@ def napari_regionprops_map_channels_table(
         ref_channel=ref_channel,
         intersection_area_over_object_area=intersection_area_over_object_area,
         summary=return_summary_statistics,
+        statistics_list=statistics_list,
         size=size,
         intensity=intensity,
         perimeter=perimeter,
@@ -299,11 +373,12 @@ def napari_regionprops_map_channels_table(
     else:
         return table_list
 
-
 def regionprops_map_channels_table(labels_array, intensity_image=None,
                                    ref_channel=None,
                                    intersection_area_over_object_area=0.5,
-                                   summary=True, **kwargs):
+                                   summary=True,
+                                   statistics_list=['count'],
+                                   **kwargs):
     """
     Measure properties from 2 (or more) channels and return summary statistics.
 
@@ -490,7 +565,7 @@ def regionprops_map_channels_table(labels_array, intensity_image=None,
                 inplace=True)
             probe_channel_props.drop(columns='label', inplace=True)
             table = pd.concat([label_links, probe_channel_props], axis=1)
-
+            
             # Insert new column names (from probe channel)
             probe_column_names = probe_channel_props.columns.to_list()
             col_names = col_names[1:] + [col_names[0]] + probe_column_names
@@ -500,13 +575,22 @@ def regionprops_map_channels_table(labels_array, intensity_image=None,
             if summary:
                 grouped = table.groupby('label-ch' + str(ref_channel))
                 table = grouped[probe_column_names].describe().reset_index()
+                
+                # Filter by selected statistics
+                selected_columns = [('label-ch' + str(ref_channel), '')]
+                for stat in statistics_list:
+                    for column in table.columns:
+
+                        column_stat = column[-1]
+                        if stat == column_stat:
+                            selected_columns.append(column)
+                table = table.loc[:,selected_columns]
             table_list += [table]
 
     return table_list
 
-
-regionprops_map_channels_table_all_frames = analyze_all_frames(
-    napari_regionprops_map_channels_table)
-register_function(
-    regionprops_map_channels_table_all_frames,
-    menu="Measurement > Regionprops map multichannel of all frames (nsr)")
+# regionprops_map_channels_table_all_frames = analyze_all_frames(
+#     napari_regionprops_map_channels_table)
+# register_function(
+#     regionprops_map_channels_table_all_frames,
+#     menu="Measurement > Regionprops map multichannel of all frames (nsr)")
