@@ -629,7 +629,7 @@ def regionprops_map_channels_table(labels_array, intensity_image=None,
                 table = grouped[probe_column_names].describe().reset_index()
                 
                 # Filter by selected statistics
-                selected_columns = [('label-ch' + str(ref_channel), '')]
+                selected_columns = [('label' + suffixes[ref_channel], '')]
                 for stat in statistics_list:
                     for column in table.columns:
 
