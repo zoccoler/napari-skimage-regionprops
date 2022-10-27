@@ -325,18 +325,22 @@ def napari_regionprops_map_channels_table(
     if maximum:
         statistics_list += ['max']
     
+    suffixes = []
     if napari_viewer is not None:
         # store list of labels layers for saving results later
         labels_layer_list = [None]*len(label_images)
         for layer in napari_viewer.layers:
             if type(layer) is napari.layers.Labels:
-                # Store in the same order as labels_list
+                # Store in the same order as label_images
                 for i, labels in enumerate(label_images):
                     if np.array_equal(layer.data, labels):
                         labels_layer_list[i] = layer
+                        suffixes += [layer.name]
+                    # Store reference channel index
                     if np.array_equal(reference_label_image, labels):
                         ref_channel = i
     # If single label image is provided, indicate to do single channel regionprops
+    # ref_channel is used as a flag to indicate single or multi-channel
     if len(label_images) == 1:
         ref_channel = None
         label_images = label_images[0]
@@ -353,6 +357,7 @@ def napari_regionprops_map_channels_table(
         intersection_area_over_object_area=intersection_area_over_object_area,
         summary=return_summary_statistics,
         statistics_list=statistics_list,
+        suffixes=suffixes,
         size=size,
         intensity=intensity,
         perimeter=perimeter,
@@ -363,22 +368,32 @@ def napari_regionprops_map_channels_table(
     if napari_viewer is not None:
         # turn table into a widget
         from ._table import add_table
+        # Clear labels layer properties (avoid appending when re-running)
+        labels_layer_list[ref_channel].properties = {}
+        
         # Store results in the properties dictionary:
-        for labels_layer, table in zip(labels_layer_list, table_list):
-            # Flatten summary statistics table
-            table.columns = [' '.join(col).strip()
-                             for col in table.columns.values]
-            labels_layer.properties = table
-            add_table(labels_layer, napari_viewer)
+        for table in table_list:
+            if (return_summary_statistics) and (ref_channel != None):
+                # Flatten summary statistics table
+                table.columns = [' '.join(col).strip()
+                                 for col in table.columns.values]
+            # In case of single channel, reference channel is the unique and first
+            if ref_channel == None:
+                ref_channel = 0
+            # Append table to properties of reference layer
+            labels_layer_list[ref_channel].properties = table
+            # Display table (which also adds it to features)
+            add_table(labels_layer_list[ref_channel], napari_viewer)
     else:
         return table_list
 
 def regionprops_map_channels_table(labels_array, intensity_image=None,
                                    ref_channel=None,
                                    intersection_area_over_object_area=0.5,
-                                   summary=True,
+                                   summary=True, suffixes = None,
                                    statistics_list=['count'],
                                    **kwargs):
+
     """
     Measure properties from 2 (or more) channels and return summary statistics.
 
@@ -408,6 +423,9 @@ def regionprops_map_channels_table(labels_array, intensity_image=None,
     summary: bool, optional
         Determine whether to return summary statistics or direct relatioships.
         Default is True.
+    suffixes: List[str], optional
+        Suffixes to identify each channel. List must match number of channel in
+        'labels_array'. If None, then '-ch' + number is used.
 
     Returns
     -------
@@ -424,7 +442,7 @@ def regionprops_map_channels_table(labels_array, intensity_image=None,
     import pandas as pd
     # To DO: check if input shape is correct
     table_list = []
-    # Single channel
+    # Single channel case (single label image provided)
     if ref_channel is None:
         table_list += [regionprops_table(image = intensity_image,
                                         labels = labels_array,
@@ -432,8 +450,13 @@ def regionprops_map_channels_table(labels_array, intensity_image=None,
         return table_list
     # Channel axis is expected to be 0
     n_channels = labels_array.shape[0]
-    
+   
     large_numbers = False
+    # If not provided, create default suffixes
+    if not suffixes:
+        suffixes = ['-ch' + str(i) for i in range(n_channels)]
+    else:
+        suffixes = ['-' + suffix for suffix in suffixes]
 
     def highest_overlap(regionmask, intensity_image,
                         overlap_threshold=intersection_area_over_object_area):
@@ -497,6 +520,15 @@ def regionprops_map_channels_table(labels_array, intensity_image=None,
     ref_channel_props = regionprops_table(image=image,
                                           labels=labels_array[ref_channel],
                                           **kwargs)
+    # Add background measurement (basically NaNs)
+    ref_props_table = pd.DataFrame(ref_channel_props) # Convert to table
+    ref_props_table.loc[-1] = np.nan # Add first line with NaN
+    ref_props_table.index = ref_props_table.index + 1 # Increment indices
+    ref_props_table = ref_props_table.sort_index() # Sort rows by index
+    ref_props_table.iloc[0,0] = 0 # Add '0' to first cell (bg label is 0)
+    # Turn it back into dictionary
+    ref_channel_props = {name: ref_props_table[name].values for name in ref_props_table.columns}
+
     for i in range(n_channels):
         if i != ref_channel:
             # Create table (label_links) that links labels from probe channel
@@ -509,20 +541,30 @@ def regionprops_map_channels_table(labels_array, intensity_image=None,
                                      )
             ).astype(int)
             # rename column
-            label_links.rename(columns={'label': 'label-ch' + str(i),
+            label_links.rename(columns={'label': 'label' + suffixes[i],
                                         'highest_overlap':
-                                            'label-ch' + str(ref_channel)},
+                                            'label' + suffixes[ref_channel]},
                                inplace=True)
 
             # Include extra properties of reference channel
             properties_with_extras = [props for props in ref_channel_props
                                       if props != 'label']
+            
+            # Add missing reference labels to table (they belong to background)
+            for ref_label in ref_channel_props['label'].tolist():
+                if ref_label not in label_links['label' + suffixes[ref_channel]].values:
+                    label_links.loc[-1] = [0, ref_label] # adding a row
+                    label_links.index = label_links.index + 1 # shifting index
+            label_links = label_links.sort_index() # sorting by index
+            
             # Append properties of reference channel to table
             for props in properties_with_extras:
                 large_numbers = False
                 # If large numbers, store format and convert to string to allow
                 # pandas replacement below, restore data type afterwards
-                if abs(ref_channel_props[props]).values.max() > np.iinfo(np.int32).max:
+                ref_channel_props_dropped_nans = ref_channel_props[props][
+                    ~np.isnan(ref_channel_props[props])]
+                if abs(ref_channel_props_dropped_nans).max() > np.iinfo(np.int32).max:
                     large_numbers = True
                     props_dtype = ref_channel_props[props].dtype
                     ref_channel_props[props] = \
@@ -532,19 +574,20 @@ def regionprops_map_channels_table(labels_array, intensity_image=None,
                     ref_channel_props['label'].tolist(),
                     ref_channel_props[props].tolist())
 
-                label_links[props + '-ch' + str(ref_channel)] = \
-                    label_links['label-ch' + str(ref_channel)]
+                label_links[props + suffixes[ref_channel]] = \
+                    label_links['label' + suffixes[ref_channel]]
 
                 label_links = label_links.replace(
-                    {props + '-ch' + str(ref_channel): props_mapping}
+                    {props + suffixes[ref_channel]: props_mapping}
                     )
 
                 if large_numbers:
-                    label_links[props + '-ch' + str(ref_channel)] = \
-                        label_links[props + '-ch' + str(ref_channel)]\
+                    label_links[props + suffixes[ref_channel]] = \
+                        label_links[props + suffixes[ref_channel]]\
                         .astype(props_dtype)
 
             col_names = label_links.columns.to_list()
+            
             # Append properties of probe channel to table
             if intensity_image is not None:
                 # If single intensity image was given, then use it
@@ -558,22 +601,31 @@ def regionprops_map_channels_table(labels_array, intensity_image=None,
                                   labels=labels_array[i],
                                   **kwargs)
             )
-            # rename column
+            # rename columns
             probe_channel_props.rename(
-                columns=dict([(props, props + '-ch' + str(i))
+                columns=dict([(props, props + suffixes[i])
                               for props in properties_with_extras]),
                 inplace=True)
-            probe_channel_props.drop(columns='label', inplace=True)
-            table = pd.concat([label_links, probe_channel_props], axis=1)
+            probe_channel_props.rename(columns={'label': 'label' + suffixes[i]},
+                                       inplace=True)
             
-            # Insert new column names (from probe channel)
-            probe_column_names = probe_channel_props.columns.to_list()
+            # Merge reference table *label_links) with probe table
+            # (probe_channel_props) based on column "label-ch probe#" 
+            # 'outer' indicates to include everything and fill with nans
+            table = label_links.merge(probe_channel_props,
+                                      on = 'label' + suffixes[i],
+                                      how = 'outer')
+
+            # Insert new column names (from probe channel), except 'label-ch #'
+            probe_column_names = probe_channel_props.columns.to_list()[1:]
             col_names = col_names[1:] + [col_names[0]] + probe_column_names
             # Re-order columns
             table = table[col_names]
-
+            # Re-order rows
+            table = table.sort_values(by=['label' + suffixes[ref_channel]]) \
+                .reset_index().iloc[:,1:]
             if summary:
-                grouped = table.groupby('label-ch' + str(ref_channel))
+                grouped = table.groupby('label' + suffixes[ref_channel])
                 table = grouped[probe_column_names].describe().reset_index()
                 
                 # Filter by selected statistics
